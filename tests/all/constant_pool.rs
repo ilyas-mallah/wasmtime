@@ -1,6 +1,8 @@
 //! Tests for Cranelift's `separate_constant_pool` setting, which keeps the
 //! constants loaded by compiled code out of executable pages.
 
+#![cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(miri)))]
+
 use object::{Object, ObjectSection};
 use wasmtime::*;
 
@@ -37,7 +39,6 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 #[test]
-#[cfg_attr(any(not(target_arch = "x86_64"), miri), ignore)]
 fn constants_are_outside_the_text_section() -> Result<()> {
     let engine = engine(true)?;
     let cwasm = engine.precompile_module(WAT.as_bytes())?;
@@ -63,7 +64,6 @@ fn constants_are_outside_the_text_section() -> Result<()> {
 }
 
 #[test]
-#[cfg_attr(any(not(target_arch = "x86_64"), miri), ignore)]
 fn constants_are_in_the_text_section_by_default() -> Result<()> {
     let engine = engine(false)?;
     let cwasm = engine.precompile_module(WAT.as_bytes())?;
@@ -78,7 +78,6 @@ fn constants_are_in_the_text_section_by_default() -> Result<()> {
 }
 
 #[test]
-#[cfg_attr(any(not(target_arch = "x86_64"), miri), ignore)]
 fn code_loads_constants_from_the_new_section() -> Result<()> {
     let engine = engine(true)?;
     let cwasm = engine.precompile_module(WAT.as_bytes())?;

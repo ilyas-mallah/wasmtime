@@ -1,0 +1,46 @@
+test compile precise-output
+set separate_constant_pool=false
+target aarch64
+
+;; Without the setting constants are loaded with a PC-relative literal load,
+;; as before.
+function %vconst() -> i8x16 {
+block0:
+    v0 = vconst.i8x16 [1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16]
+    return v0
+}
+
+; VCode:
+; block0:
+;   ldr q0, [const(0)]
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   ldr q0, #0x10
+;   ret
+;   udf #0
+;   udf #0
+;   subr z1.b, p0/m, z1.b, z16.b
+;   stxrb w7, w5, [x16]
+;   .byte 0x09, 0x0a, 0x0b, 0x0c
+;   adr x13, #0x1e1dc
+
+function %f64const() -> f64 {
+block0:
+    v0 = f64const 0x1.23456789abcdep0
+    return v0
+}
+
+; VCode:
+; block0:
+;   ldr d0, [const(0)]
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   ldr d0, #8
+;   ret
+;   ldrsh x30, [x6, #-0x55]!
+;   .byte 0x56, 0x34, 0xf2, 0x3f
+

@@ -171,7 +171,7 @@ pub(crate) fn define() -> SettingGroup {
             resolves once it places the blob, for example in a read-only,
             non-executable section. See `MachBufferFinalized::constant_pool`.
 
-            This is currently supported on x86_64. Other targets return an
+            This is currently supported on x86_64 and aarch64. Other targets return an
             error when it is enabled. Jump tables and other data that is not
             a constant stay in the function's code.
 

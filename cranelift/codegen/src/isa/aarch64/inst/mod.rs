@@ -351,6 +351,9 @@ fn memarg_operands(memarg: &mut AMode, collector: &mut impl OperandVisitor) {
             collector.reg_use(rn);
         }
         AMode::Const { .. } => {}
+        AMode::ConstPageOff { rn, .. } => {
+            collector.reg_use(rn);
+        }
     }
 }
 
@@ -981,7 +984,7 @@ fn aarch64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             CondBrKind::Zero(rt, _) | CondBrKind::NotZero(rt, _) => collector.reg_use(rt),
             CondBrKind::Cond(_) => {}
         },
-        Inst::Adr { rd, .. } | Inst::Adrp { rd, .. } => {
+        Inst::Adr { rd, .. } | Inst::Adrp { rd, .. } | Inst::AdrpConst { rd, .. } => {
             collector.reg_def(rd);
         }
         Inst::Word4 { .. } | Inst::Word8 { .. } => {}
@@ -3017,6 +3020,10 @@ impl Inst {
                 let byte_offset = off * 4096;
                 format!("adrp {rd}, pc+{byte_offset}")
             }
+            &Inst::AdrpConst { rd, constant } => {
+                let rd = pretty_print_reg(rd.to_reg());
+                format!("adrp {rd}, const({})@page", constant.as_u32())
+            }
             &Inst::Word4 { data } => format!("data.i32 {data}"),
             &Inst::Word8 { data } => format!("data.i64 {data}"),
             &Inst::JTSequence {
@@ -3226,6 +3233,19 @@ pub enum LabelUse {
     /// 32-bit PC relative constant offset (from address of constant itself),
     /// signed. Used in jump tables.
     PCRel32,
+    /// 21-bit offset for ADRP (get address of the page of a label). The offset
+    /// is the signed number of 4 KiB pages from the page of the instruction to
+    /// the page of the label, in the same bits as `Adr21`. This assumes that
+    /// the code starts on a page boundary, so it is only used for references
+    /// to the separate constant pool.
+    Adrp21,
+    /// 12-bit unsigned offset of a load or store, in bits 21:10. It holds the
+    /// offset of the label in its page, divided by the access size. This is
+    /// used together with `Adrp21`.
+    Ldst12 {
+        /// log2 of the access size in bytes.
+        shift: u8,
+    },
 }
 
 impl MachInstLabelUse for LabelUse {
@@ -3246,6 +3266,8 @@ impl MachInstLabelUse for LabelUse {
             // range.
             LabelUse::Adr21 => (1 << 20) - 1,
             LabelUse::PCRel32 => 0x7fffffff,
+            // ADRP reaches +/-4 GiB, more than a `CodeOffset` can express.
+            LabelUse::Adrp21 | LabelUse::Ldst12 { .. } => 0x7fffffff,
         }
     }
 
@@ -3264,6 +3286,31 @@ impl MachInstLabelUse for LabelUse {
 
     /// Perform the patch.
     fn patch(self, buffer: &mut [u8], use_offset: CodeOffset, label_offset: CodeOffset) {
+        // These two are not byte distances. They count 4 KiB pages and
+        // address bits, which assumes that offsets are from a page-aligned
+        // base.
+        match self {
+            LabelUse::Adrp21 => {
+                let pages = (label_offset >> 12).wrapping_sub(use_offset >> 12);
+                // As for `Adr21`, the low two bits go in bits 30:29.
+                let inserted = (pages & 0x1ffffc) << 3 | (pages & 3) << 29;
+                let insn_word = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+                let insn_word = (insn_word & !0x60ffffe0) | inserted;
+                buffer[0..4].clone_from_slice(&u32::to_le_bytes(insn_word));
+                return;
+            }
+            LabelUse::Ldst12 { shift } => {
+                let offset_in_page = label_offset & 0xfff;
+                debug_assert_eq!(offset_in_page & ((1 << shift) - 1), 0);
+                let inserted = (offset_in_page >> shift) << 10;
+                let insn_word = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+                let insn_word = (insn_word & !0x003ffc00) | inserted;
+                buffer[0..4].clone_from_slice(&u32::to_le_bytes(insn_word));
+                return;
+            }
+            _ => {}
+        }
+
         let pc_rel = (label_offset as i64) - (use_offset as i64);
         assert!(pc_rel <= self.max_pos_range() as i64);
         assert!(pc_rel >= -(self.max_neg_range() as i64));
@@ -3276,6 +3323,7 @@ impl MachInstLabelUse for LabelUse {
             LabelUse::Ldr19 => 0x00ffffe0,    // bits 23..5 inclusive
             LabelUse::Adr21 => 0x60ffffe0,    // bits 30..29, 25..5 inclusive
             LabelUse::PCRel32 => 0xffffffff,
+            LabelUse::Adrp21 | LabelUse::Ldst12 { .. } => unreachable!(),
         };
         let pc_rel_shifted = match self {
             LabelUse::Adr21 | LabelUse::PCRel32 => pc_rel,
@@ -3292,6 +3340,7 @@ impl MachInstLabelUse for LabelUse {
             // *high* bits (30, 29).
             LabelUse::Adr21 => (pc_rel_shifted & 0x1ffffc) << 3 | (pc_rel_shifted & 3) << 29,
             LabelUse::PCRel32 => pc_rel_shifted,
+            LabelUse::Adrp21 | LabelUse::Ldst12 { .. } => unreachable!(),
         };
         let is_add = match self {
             LabelUse::PCRel32 => true,
@@ -3382,6 +3431,18 @@ impl MachInstLabelUse for LabelUse {
     fn from_reloc(reloc: Reloc, addend: Addend) -> Option<LabelUse> {
         match (reloc, addend) {
             (Reloc::Arm64Call, 0) => Some(LabelUse::Branch26),
+            (Reloc::Aarch64AdrPrelPgHi21, 0) => Some(LabelUse::Adrp21),
+            (Reloc::Aarch64Ldst64AbsLo12Nc, 0) => Some(LabelUse::Ldst12 { shift: 3 }),
+            (Reloc::Aarch64Ldst128AbsLo12Nc, 0) => Some(LabelUse::Ldst12 { shift: 4 }),
+            _ => None,
+        }
+    }
+
+    fn to_reloc(self) -> Option<(Reloc, Addend)> {
+        match self {
+            LabelUse::Adrp21 => Some((Reloc::Aarch64AdrPrelPgHi21, 0)),
+            LabelUse::Ldst12 { shift: 3 } => Some((Reloc::Aarch64Ldst64AbsLo12Nc, 0)),
+            LabelUse::Ldst12 { shift: 4 } => Some((Reloc::Aarch64Ldst128AbsLo12Nc, 0)),
             _ => None,
         }
     }
