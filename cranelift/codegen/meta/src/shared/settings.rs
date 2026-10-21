@@ -174,6 +174,10 @@ pub(crate) fn define() -> SettingGroup {
             This is currently supported on x86_64. Other targets return an
             error when it is enabled. Jump tables and other data that is not
             a constant stay in the function's code.
+
+            Wasmtime places the constants in the `.wasmtime.constants` section
+            after the page-aligned `.text` section. Winch ignores this setting
+            and keeps its constants in the code.
         "#,
         false,
     );

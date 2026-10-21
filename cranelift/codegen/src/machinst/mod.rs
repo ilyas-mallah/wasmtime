@@ -843,6 +843,26 @@ pub trait TextSectionBuilder {
     /// relocation will be resolved in the final bytes returned by `finish`.
     fn resolve_reloc(&mut self, offset: u64, reloc: Reloc, addend: Addend, target: usize) -> bool;
 
+    /// Records that the text at `offset` refers to the constant at
+    /// `constant_offset` in a constants section that the caller places after
+    /// the text, as described by a `MachConstantReloc`.
+    ///
+    /// The reference is resolved by `patch_constant_refs` once the location
+    /// of the constants is known. If this builder does not know how to handle
+    /// `reloc` then this function returns `false`.
+    fn resolve_constant_reloc(
+        &mut self,
+        offset: u64,
+        reloc: Reloc,
+        addend: Addend,
+        constant_offset: u64,
+    ) -> bool;
+
+    /// Resolves the references recorded by `resolve_constant_reloc` in the
+    /// finished `text`, where `constants_offset` is the offset of the
+    /// constants section from the start of the text.
+    fn patch_constant_refs(&self, text: &mut [u8], constants_offset: u64);
+
     /// A debug-only option which is used to for
     fn force_veneers(&mut self);
 
