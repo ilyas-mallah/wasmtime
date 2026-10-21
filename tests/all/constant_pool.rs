@@ -65,6 +65,10 @@ fn constants_are_outside_the_text_section() -> Result<()> {
 
 #[test]
 fn constants_are_in_the_text_section_by_default() -> Result<()> {
+    // The temporary test hook turns the setting on for every engine.
+    if std::env::var_os("WASMTIME_PROTO_SEPARATE_CONSTANTS").is_some() {
+        return Ok(());
+    }
     let engine = engine(false)?;
     let cwasm = engine.precompile_module(WAT.as_bytes())?;
     let elf = object::File::parse(&cwasm[..])?;

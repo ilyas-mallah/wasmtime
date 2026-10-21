@@ -94,8 +94,19 @@ impl<T> IsaBuilder<T> {
     }
 
     pub fn build(&self) -> T {
-        self.inner
-            .finish(settings::Flags::new(self.shared_flags.clone()))
+        let mut shared = self.shared_flags.clone();
+        // Temporary, to be removed before this is proposed as a PR. Setting
+        // this environment variable runs a whole test suite with
+        // `separate_constant_pool` on the architectures that support it.
+        if std::env::var_os("WASMTIME_PROTO_SEPARATE_CONSTANTS").is_some()
+            && matches!(
+                self.inner.triple().architecture,
+                target_lexicon::Architecture::X86_64 | target_lexicon::Architecture::Aarch64(_)
+            )
+        {
+            shared.enable("separate_constant_pool").unwrap();
+        }
+        self.inner.finish(settings::Flags::new(shared))
     }
 
     pub fn shared_flags(&self) -> Flags {
