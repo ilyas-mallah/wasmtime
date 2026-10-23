@@ -95,3 +95,64 @@ fn code_loads_constants_from_the_new_section() -> Result<()> {
     );
     Ok(())
 }
+
+/// Keeps `N` values built from distinct constants live at once. The stack
+/// frame is then larger than the offset of a scaled `ldr q` on AArch64 can
+/// reach, so the register allocator addresses spill slots through `x16`
+/// around the `adrp` and the load of each constant.
+#[test]
+fn constant_loads_in_a_function_with_a_large_frame() -> Result<()> {
+    use std::fmt::Write;
+
+    const N: usize = 4200;
+    let mut state = 0x9402_u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let consts: Vec<[u64; 2]> = (0..N).map(|_| [next(), next()]).collect();
+
+    // Locals: 0 is the argument, 1 is the accumulator, then one per constant.
+    let mut wat =
+        String::from("(module (func (export \"f\") (param i64) (result i64) (local v128)");
+    wat.push_str(&" (local v128)".repeat(N));
+    for (i, [lo, hi]) in consts.iter().enumerate() {
+        writeln!(
+            wat,
+            "(local.set {} (i64x2.add (i64x2.splat (local.get 0)) (v128.const i64x2 {lo} {hi})))",
+            2 + i
+        )?;
+    }
+    wat.push_str("(local.set 1 (i64x2.splat (local.get 0)))\n");
+    for i in 0..N {
+        writeln!(
+            wat,
+            "(local.set 1 (i64x2.add (v128.xor (local.get 1) (local.get {})) (local.get {})))",
+            2 + i,
+            2 + N - 1 - i
+        )?;
+    }
+    wat.push_str(
+        "(i64.xor (i64x2.extract_lane 0 (local.get 1)) (i64x2.extract_lane 1 (local.get 1)))))",
+    );
+
+    let arg = 7_u64;
+    let mut acc = [arg; 2];
+    for i in 0..N {
+        for lane in 0..2 {
+            let at = |c: usize| arg.wrapping_add(consts[c][lane]);
+            acc[lane] = (acc[lane] ^ at(i)).wrapping_add(at(N - 1 - i));
+        }
+    }
+    let expected = (acc[0] ^ acc[1]) as i64;
+
+    let engine = engine(true)?;
+    let module = Module::new(&engine, &wat)?;
+    let mut store = Store::new(&engine, ());
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let f = instance.get_typed_func::<i64, i64>(&mut store, "f")?;
+    assert_eq!(f.call(&mut store, arg as i64)?, expected);
+    Ok(())
+}
